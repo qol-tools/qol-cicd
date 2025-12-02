@@ -1,0 +1,84 @@
+name: Release plugins
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install semantic-release
+        run: npm install -g semantic-release @semantic-release/exec @semantic-release/git
+
+      - name: Release all plugins
+        env:
+          GITHUB_TOKEN: ${{ secrets.ORG_PAT }}
+        run: |
+          ORG="qol-tools"
+          TOPIC="qol-tray-plugin"
+
+          echo "Finding repos with topic: $TOPIC"
+          repos=$(gh api "orgs/$ORG/repos" --paginate -q '.[] | select(.topics | index("'"$TOPIC"'")) | .name')
+
+          for repo in $repos; do
+            echo ""
+            echo "=== Processing $repo ==="
+            
+            # Clone the repo
+            gh repo clone "$ORG/$repo" "/tmp/$repo" -- --depth=50
+            cd "/tmp/$repo"
+
+            # Check if there are commits since last tag
+            last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [[ -n "$last_tag" ]]; then
+              commits_since=$(git rev-list "$last_tag"..HEAD --count)
+              if [[ "$commits_since" == "0" ]]; then
+                echo "No new commits since $last_tag, skipping"
+                cd /
+                rm -rf "/tmp/$repo"
+                continue
+              fi
+              echo "Found $commits_since commits since $last_tag"
+            else
+              echo "No tags yet, will create initial release"
+            fi
+
+            # Create .releaserc.json if not exists
+            if [[ ! -f .releaserc.json ]]; then
+              cat > .releaserc.json << 'EOF'
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              ["@semantic-release/exec", {
+                "prepareCmd": "sed -i 's/^version = .*/version = \"${nextRelease.version}\"/' plugin.toml"
+              }],
+              ["@semantic-release/git", {
+                "assets": ["plugin.toml"],
+                "message": "chore(release): ${nextRelease.version}"
+              }],
+              "@semantic-release/github"
+            ]
+          }
+          EOF
+            fi
+
+            # Run semantic-release
+            echo "Running semantic-release..."
+            npx semantic-release || echo "No release needed or error occurred"
+
+            cd /
+            rm -rf "/tmp/$repo"
+          done
+
+          echo ""
+          echo "=== Done ==="
+
