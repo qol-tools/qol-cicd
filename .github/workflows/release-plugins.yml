@@ -51,25 +51,29 @@ jobs:
               echo "No tags yet, will create initial release"
             fi
 
+            # Detect default branch
+            default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+            echo "Default branch: $default_branch"
+
             # Create .releaserc.json if not exists
             if [[ ! -f .releaserc.json ]]; then
-              cat > .releaserc.json << 'EOF'
+              cat > .releaserc.json << RELEASERC
           {
-            "branches": ["main"],
+            "branches": ["$default_branch"],
             "plugins": [
               "@semantic-release/commit-analyzer",
               "@semantic-release/release-notes-generator",
               ["@semantic-release/exec", {
-                "prepareCmd": "sed -i 's/^version = .*/version = \"${nextRelease.version}\"/' plugin.toml"
+                "prepareCmd": "sed -i 's/^version = .*/version = \"\${nextRelease.version}\"/' plugin.toml"
               }],
               ["@semantic-release/git", {
                 "assets": ["plugin.toml"],
-                "message": "chore(release): ${nextRelease.version}"
+                "message": "chore(release): \${nextRelease.version}"
               }],
               "@semantic-release/github"
             ]
           }
-          EOF
+          RELEASERC
             fi
 
             # Run semantic-release
