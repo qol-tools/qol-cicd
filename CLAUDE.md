@@ -1,1 +1,0 @@
-/Users/kaho/.claude/CLAUDE.md
