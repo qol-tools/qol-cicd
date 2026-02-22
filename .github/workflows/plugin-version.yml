@@ -1,0 +1,191 @@
+name: Plugin Version
+
+on:
+  workflow_call:
+    inputs:
+      cargo_manifest:
+        type: string
+        required: false
+        default: Cargo.toml
+      plugin_manifest:
+        type: string
+        required: false
+        default: plugin.toml
+      tag_prefix:
+        type: string
+        required: false
+        default: v
+    outputs:
+      should_release:
+        description: Whether a release should be created
+        value: ${{ jobs.version.outputs.should_release }}
+      version:
+        description: Computed semver without tag prefix
+        value: ${{ jobs.version.outputs.version }}
+      bump:
+        description: Bump type (major, minor, patch)
+        value: ${{ jobs.version.outputs.bump }}
+    secrets:
+      BOT_TOKEN:
+        required: false
+        description: "(Optional) A Personal Access Token or App Token to use for pushing commits/tags. This is REQUIRED if you want the pushed tag to trigger another GitHub workflow (like the release build workflow)."
+  workflow_dispatch:
+    inputs:
+      cargo_manifest:
+        type: string
+        required: false
+        default: Cargo.toml
+      plugin_manifest:
+        type: string
+        required: false
+        default: plugin.toml
+      tag_prefix:
+        type: string
+        required: false
+        default: v
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin-version-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.compute.outputs.should_release }}
+      version: ${{ steps.compute.outputs.version }}
+      bump: ${{ steps.compute.outputs.bump }}
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.BOT_TOKEN || github.token }}
+
+      - name: Checkout qol-cicd repo
+        uses: actions/checkout@v4
+        with:
+          repository: qol-tools/qol-cicd
+          path: .qol-cicd
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute version
+        id: compute
+        shell: bash
+        env:
+          CARGO_MANIFEST: ${{ inputs.cargo_manifest || github.event.inputs.cargo_manifest || 'Cargo.toml' }}
+          PLUGIN_MANIFEST: ${{ inputs.plugin_manifest || github.event.inputs.plugin_manifest || 'plugin.toml' }}
+          TAG_PREFIX: ${{ inputs.tag_prefix || github.event.inputs.tag_prefix || 'v' }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "${CARGO_MANIFEST}" ]]; then
+            echo "Missing cargo manifest: ${CARGO_MANIFEST}"
+            exit 1
+          fi
+
+          if [[ ! -f "${PLUGIN_MANIFEST}" ]]; then
+            echo "Missing plugin manifest: ${PLUGIN_MANIFEST}"
+            exit 1
+          fi
+
+          git fetch --tags --force
+
+          head_subject="$(git log -1 --pretty=%s)"
+          escaped_prefix="$(printf '%s' "${TAG_PREFIX}" | sed -e 's/[][(){}.^$*+?|\\/]/\\\\&/g')"
+
+          shopt -s nocasematch
+          if [[ "${head_subject}" =~ ^chore\(release\):[[:space:]]*${escaped_prefix}([0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?)$ ]]; then
+            release_version="${BASH_REMATCH[1]}"
+            if git rev-parse -q --verify "refs/tags/${TAG_PREFIX}${release_version}" >/dev/null; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              echo "bump=" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "version=${release_version}" >> "$GITHUB_OUTPUT"
+              echo "bump=" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          shopt -u nocasematch
+
+          cargo_version="$(awk -F'"' '/^version = "[^\"]+"/ {print $2; exit}' "${CARGO_MANIFEST}")"
+          plugin_version="$(awk -F'"' '/^version = "[^\"]+"/ {print $2; exit}' "${PLUGIN_MANIFEST}")"
+
+          if [[ -z "${cargo_version}" || -z "${plugin_version}" ]]; then
+            echo "Failed to parse version from manifests"
+            exit 1
+          fi
+
+          if [[ "${cargo_version}" != "${plugin_version}" ]]; then
+            echo "Manifest versions differ: cargo=${cargo_version} plugin=${plugin_version}"
+            exit 1
+          fi
+
+          last_tag="$(git describe --tags --abbrev=0 --match "${TAG_PREFIX}[0-9]*" 2>/dev/null || true)"
+          base_version="${cargo_version}"
+          from_ref_args=()
+
+          if [[ -n "${last_tag}" ]]; then
+            commits_since="$(git rev-list "${last_tag}"..HEAD --count)"
+            if [[ "${commits_since}" == "0" ]]; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              echo "bump=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            base_version="${last_tag#${TAG_PREFIX}}"
+            from_ref_args=(--from-ref "${last_tag}")
+          fi
+
+          python3 .qol-cicd/standards/versioning/next_version.py git --repo . "${from_ref_args[@]}" --to-ref HEAD --base-version "${base_version}" --tag-pattern "${TAG_PREFIX}*" --tag-prefix "${TAG_PREFIX}" --output-format github --github-output "$GITHUB_OUTPUT"
+
+      - name: Update manifests
+        if: steps.compute.outputs.should_release == 'true'
+        shell: bash
+        env:
+          CARGO_MANIFEST: ${{ inputs.cargo_manifest || github.event.inputs.cargo_manifest || 'Cargo.toml' }}
+          PLUGIN_MANIFEST: ${{ inputs.plugin_manifest || github.event.inputs.plugin_manifest || 'plugin.toml' }}
+          VERSION: ${{ steps.compute.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" "${CARGO_MANIFEST}"
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" "${PLUGIN_MANIFEST}"
+
+      - name: Commit and tag
+        if: steps.compute.outputs.should_release == 'true'
+        shell: bash
+        env:
+          CARGO_MANIFEST: ${{ inputs.cargo_manifest || github.event.inputs.cargo_manifest || 'Cargo.toml' }}
+          PLUGIN_MANIFEST: ${{ inputs.plugin_manifest || github.event.inputs.plugin_manifest || 'plugin.toml' }}
+          VERSION: ${{ steps.compute.outputs.version }}
+          TAG_PREFIX: ${{ inputs.tag_prefix || github.event.inputs.tag_prefix || 'v' }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${CARGO_MANIFEST}" "${PLUGIN_MANIFEST}"
+
+          if git diff --cached --quiet; then
+            if ! git rev-parse -q --verify "refs/tags/${TAG_PREFIX}${VERSION}" >/dev/null; then
+              git tag "${TAG_PREFIX}${VERSION}"
+              git push origin "${TAG_PREFIX}${VERSION}"
+            fi
+            exit 0
+          fi
+
+          git commit -m "chore(release): ${TAG_PREFIX}${VERSION}"
+          git tag "${TAG_PREFIX}${VERSION}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "${TAG_PREFIX}${VERSION}"
