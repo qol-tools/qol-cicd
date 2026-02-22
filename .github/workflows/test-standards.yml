@@ -1,0 +1,33 @@
+name: Test Standards
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'standards/**'
+      - '.github/workflows/test-standards.yml'
+      - '.github/workflows/plugin-version.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'standards/**'
+      - '.github/workflows/test-standards.yml'
+      - '.github/workflows/plugin-version.yml'
+
+jobs:
+  versioning:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python3 -m pip install -r standards/versioning/requirements-dev.txt
+
+      - name: Run tests
+        run: python3 -m pytest standards/versioning/tests -n auto --dist worksteal -v --no-header --no-summary
