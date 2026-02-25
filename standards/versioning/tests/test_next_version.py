@@ -11,6 +11,7 @@ from standards.versioning.next_version import Commit
 from standards.versioning.next_version import compute_next_version
 from standards.versioning.next_version import detect_bump
 from standards.versioning.next_version import increment_semver
+from standards.versioning.next_version import is_releasable_commit
 from standards.versioning.next_version import next_available_version
 from standards.versioning.next_version import parse_semver
 
@@ -59,10 +60,10 @@ def commit_with_kind(draw: st.DrawFn) -> tuple[Commit, str]:
 def commit_batch(draw: st.DrawFn) -> tuple[list[Commit], int, bool, bool]:
     pairs = draw(st.lists(commit_with_kind(), min_size=0, max_size=60))
     commits = [pair[0] for pair in pairs]
-    non_release = [pair for pair in pairs if pair[1] != "release" and pair[0].subject.strip()]
-    has_breaking = any(pair[1] in {"breaking_subject", "breaking_body"} for pair in non_release)
-    has_feat = any(pair[1] == "feat" for pair in non_release)
-    return commits, len(non_release), has_breaking, has_feat
+    releasable = [pair for pair in pairs if is_releasable_commit(pair[0])]
+    has_breaking = any(pair[1] in {"breaking_subject", "breaking_body"} for pair in releasable)
+    has_feat = any(pair[1] == "feat" for pair in releasable)
+    return commits, len(releasable), has_breaking, has_feat
 
 
 @st.composite
@@ -89,6 +90,7 @@ def test_patch_for_fix_only() -> None:
     assert result.should_release is True
     assert result.bump == "patch"
     assert result.version == "1.2.4"
+    assert result.commit_count == 1  # chore is not releasable
 
 
 def test_minor_for_feat() -> None:
@@ -115,6 +117,45 @@ def test_no_release_when_only_release_commits() -> None:
     assert result.bump is None
 
 
+def test_no_release_for_refactor_only() -> None:
+    commits = [Commit(subject="refactor: extract shared code into qol-plugin-api")]
+    result = compute_next_version("1.2.3", commits, [])
+    assert result.should_release is False
+
+
+def test_no_release_for_docs_chore_ci_style_test() -> None:
+    commits = [
+        Commit(subject="docs: update readme"),
+        Commit(subject="chore: bump deps"),
+        Commit(subject="ci: fix workflow"),
+        Commit(subject="style: format code"),
+        Commit(subject="test: add unit tests"),
+    ]
+    result = compute_next_version("1.2.3", commits, [])
+    assert result.should_release is False
+
+
+def test_release_for_perf() -> None:
+    commits = [Commit(subject="perf: speed up window enumeration")]
+    result = compute_next_version("1.2.3", commits, [])
+    assert result.should_release is True
+    assert result.bump == "patch"
+
+
+def test_breaking_refactor_still_releases() -> None:
+    commits = [Commit(subject="refactor!: rename config fields")]
+    result = compute_next_version("1.2.3", commits, [])
+    assert result.should_release is True
+    assert result.bump == "major"
+
+
+def test_breaking_body_on_non_releasable_prefix_still_releases() -> None:
+    commits = [Commit(subject="refactor: overhaul config", body="BREAKING CHANGE: removed old keys")]
+    result = compute_next_version("1.2.3", commits, [])
+    assert result.should_release is True
+    assert result.bump == "major"
+
+
 def test_invalid_semver_raises() -> None:
     with pytest.raises(ValueError, match=re.escape("Invalid semver: 1.2")):
         parse_semver("1.2")
@@ -123,17 +164,16 @@ def test_invalid_semver_raises() -> None:
 @settings(max_examples=MAX_EXAMPLES)
 @given(batch=commit_batch())
 def test_property_bump_precedence(batch: tuple[list[Commit], int, bool, bool]) -> None:
-    commits, non_release_count, has_breaking, has_feat = batch
+    commits, releasable_count, has_breaking, has_feat = batch
     expected = "patch"
     if has_breaking:
         expected = "major"
     elif has_feat:
         expected = "minor"
 
-    assert detect_bump(commits) == expected
     result = compute_next_version("1.2.3", commits, [])
-    assert result.should_release is (non_release_count > 0)
-    if non_release_count > 0:
+    assert result.should_release is (releasable_count > 0)
+    if releasable_count > 0:
         assert result.bump == expected
         assert result.version is not None
 
@@ -166,22 +206,23 @@ def test_property_compute_matches_manual_pipeline(
     batch: tuple[list[Commit], int, bool, bool],
     existing: set[str],
 ) -> None:
-    commits, non_release_count, _, _ = batch
+    commits, releasable_count, _, _ = batch
     result = compute_next_version(base, commits, existing)
 
-    if non_release_count == 0:
+    if releasable_count == 0:
         assert result.should_release is False
         assert result.version is None
         assert result.bump is None
         assert result.commit_count == 0
         return
 
-    expected_bump = detect_bump(commits)
+    releasable = [c for c in commits if is_releasable_commit(c)]
+    expected_bump = detect_bump(releasable)
     expected_seed = increment_semver(base, expected_bump)
     expected_version = next_available_version(expected_seed, existing)
 
     assert result.should_release is True
     assert result.bump == expected_bump
     assert result.version == expected_version
-    assert result.commit_count == non_release_count
+    assert result.commit_count == releasable_count
     assert f"v{result.version}" not in existing

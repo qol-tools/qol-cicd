@@ -20,6 +20,7 @@ RELEASE_SUBJECT_RE = re.compile(
 BREAKING_SUBJECT_RE = re.compile(r"^[a-z0-9_-]+(\([^)]+\))?!:", re.IGNORECASE)
 BREAKING_BODY_RE = re.compile(r"(^|\n)BREAKING[ -]CHANGE:", re.IGNORECASE)
 FEATURE_SUBJECT_RE = re.compile(r"^feat(\([^)]+\))?:", re.IGNORECASE)
+RELEASABLE_SUBJECT_RE = re.compile(r"^(feat|fix|perf)(\([^)]+\))?!?:", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,16 @@ def next_available_version(version: str, existing_tags: Iterable[str], tag_prefi
     return candidate
 
 
+def is_releasable_commit(commit: Commit) -> bool:
+    """A commit triggers a release if it is feat/fix/perf or any breaking change."""
+    subject = commit.subject.strip()
+    if not subject or is_release_commit(subject):
+        return False
+    if BREAKING_SUBJECT_RE.match(subject) or BREAKING_BODY_RE.search(commit.body or ""):
+        return True
+    return RELEASABLE_SUBJECT_RE.match(subject) is not None
+
+
 def compute_next_version(
     base_version: str,
     raw_commits: Iterable[Commit | dict[str, str]],
@@ -104,7 +115,7 @@ def compute_next_version(
 ) -> VersionResult:
     parse_semver(base_version)
     commits = normalize_commits(raw_commits)
-    release_candidates = [commit for commit in commits if commit.subject.strip() and not is_release_commit(commit.subject)]
+    release_candidates = [commit for commit in commits if is_releasable_commit(commit)]
     if not release_candidates:
         return VersionResult(should_release=False, version=None, bump=None, commit_count=0)
     bump = detect_bump(release_candidates)
