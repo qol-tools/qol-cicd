@@ -12,7 +12,7 @@ Adds the `qol-tray-plugin` topic when a repo starting with `plugin-` is created.
 
 Reusable workflow at `.github/workflows/plugin-version.yml` for per-repo version bumps.
 
-- Computes semver bump from conventional commits
+- Computes semver bump from conventional commits (`feat`/`fix`/`perf` and breaking changes only — `refactor`, `docs`, `chore`, `ci`, `style`, `test` are skipped)
 - Updates `Cargo.toml` and `plugin.toml`
 - Creates `chore(release): vX.Y.Z` commit
 - Pushes release tag `vX.Y.Z`
